@@ -17,6 +17,11 @@ from hydra.utils import instantiate
 from iopath.common.file_io import g_pathmgr
 from omegaconf import OmegaConf
 
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parents[3] / "sam3"))
+
+
 from sam3.train.utils.train_utils import makedir, register_omegaconf_resolvers
 from tqdm import tqdm
 

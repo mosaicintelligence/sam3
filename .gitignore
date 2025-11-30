@@ -132,6 +132,7 @@ checkpoints/
 sam3_logs/
 
 # Data files
+data/*
 *.h5
 *.hdf5
 *.pkl
