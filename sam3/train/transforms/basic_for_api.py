@@ -21,6 +21,8 @@ from PIL import Image as PILImage
 from sam3.model.box_ops import box_xyxy_to_cxcywh, masks_to_boxes
 from sam3.train.data.sam3_image_dataset import Datapoint
 from torchvision.transforms import InterpolationMode
+import numpy as np
+import pycocotools.mask as mask_utils
 
 
 def crop(
@@ -163,6 +165,36 @@ def get_size_with_aspect_ratio(image_size, size, max_size=None):
     return (oh, ow)
 
 
+def _decode_if_needed(seg, h, w, bbox=None):
+    if seg is None:
+        return None
+    if isinstance(seg, torch.Tensor):
+        return seg
+    try:
+        if isinstance(seg, dict):
+            arr = mask_utils.decode(seg)
+            if arr.ndim == 3:  # (H,W,1)
+                arr = arr[..., 0]
+        elif isinstance(seg, list):
+            rles = mask_utils.frPyObjects(seg, h, w)
+            rle = mask_utils.merge(rles)
+            arr = mask_utils.decode(rle)
+        elif isinstance(seg, np.ndarray):
+            arr = (seg > 0).astype(np.uint8)
+        else:
+            return None
+        if arr.ndim == 3:
+            arr = arr[..., 0]
+        return torch.as_tensor(arr, dtype=torch.uint8)
+    except Exception:
+        # optional: approximate empty with box area if available
+        if bbox is not None:
+            mask = torch.zeros((h, w), dtype=torch.uint8)
+            x1, y1, x2, y2 = [int(v) for v in bbox]
+            mask[y1:max(y1+1, y2), x1:max(x1+1, x2)] = 1
+            return mask
+        return torch.zeros((h, w), dtype=torch.uint8)
+
 def resize(datapoint, index, size, max_size=None, square=False, v2=False):
     # size can be min_size (scalar) or (w, h) tuple
 
@@ -209,24 +241,25 @@ def resize(datapoint, index, size, max_size=None, square=False, v2=False):
         )
         obj.bbox = scaled_boxes
         obj.area *= ratio_width * ratio_height
-        try:
-            if getattr(obj, "segment", None) is not None:
-                obj.segment = F.resize(obj.segment[None, None], size).squeeze()
-            else:
-                # size can be int or (h,w)
-                if isinstance(size, int):
-                    h = w = size
-                else:
-                    h, w = size
-                # uint8 (0 background) matches typical mask dtype
-                obj.segment = torch.zeros((h, w), dtype=torch.uint8)
-        except Exception as e:
-            logging.warning(f"Failed to resize segment: {e}; setting empty mask")
-            if isinstance(size, int):
-                h = w = size
-            else:
-                h, w = size
-            obj.segment = torch.zeros((h, w), dtype=torch.uint8)
+        # decode if needed BEFORE resizing
+        obj.segment = _decode_if_needed(
+            getattr(obj, "segment", None),
+            old_size[1],  # old h
+            old_size[0],  # old w
+            bbox=boxes[0]
+        )
+        if obj.segment is not None:
+            try:
+                obj.segment = F.resize(
+                    obj.segment[None, None], size, interpolation=InterpolationMode.NEAREST
+                ).squeeze(0).squeeze(0)
+            except Exception as e:
+                logging.warning(f"Failed mask resize: {e}; setting empty mask")
+                h_new, w_new = size
+                obj.segment = torch.zeros((h_new, w_new), dtype=torch.uint8)
+        else:
+            h_new, w_new = size
+            obj.segment = torch.zeros((h_new, w_new), dtype=torch.uint8)
 
     for query in datapoint.find_queries:
         if query.semantic_target is not None:
