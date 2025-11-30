@@ -232,7 +232,6 @@ class COCO_FROM_JSON:
                     annotation["segmentation"] = ann_to_rle(
                         ann["segmentation"], im_info=image_info
                     )
-                    print("Converted segmentation to RLE for training annotation.")
 
                 annotations.append(annotation)
                 cur_ann_ids.append(annotation["id"])
