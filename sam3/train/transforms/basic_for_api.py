@@ -209,8 +209,24 @@ def resize(datapoint, index, size, max_size=None, square=False, v2=False):
         )
         obj.bbox = scaled_boxes
         obj.area *= ratio_width * ratio_height
-        if obj.segment is not None:
-            obj.segment = F.resize(obj.segment[None, None], size).squeeze()
+        try:
+            if getattr(obj, "segment", None) is not None:
+                obj.segment = F.resize(obj.segment[None, None], size).squeeze()
+            else:
+                # size can be int or (h,w)
+                if isinstance(size, int):
+                    h = w = size
+                else:
+                    h, w = size
+                # uint8 (0 background) matches typical mask dtype
+                obj.segment = torch.zeros((h, w), dtype=torch.uint8)
+        except Exception as e:
+            logging.warning(f"Failed to resize segment: {e}; setting empty mask")
+            if isinstance(size, int):
+                h = w = size
+            else:
+                h, w = size
+            obj.segment = torch.zeros((h, w), dtype=torch.uint8)
 
     for query in datapoint.find_queries:
         if query.semantic_target is not None:
