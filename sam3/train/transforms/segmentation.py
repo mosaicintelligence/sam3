@@ -82,10 +82,10 @@ class RecomputeBoxesFromMasks:
 
 class DecodeRle:
     """This transform decodes RLEs into binary segments.
-    Implementing it as a transforms allows lazy loading. Some transforms (eg query filters)
+    Implementing it as a transform allows lazy loading. Some transforms (e.g., query filters)
     may be deleting masks, so decoding them from the beginning is wasteful.
 
-    This transforms needs to be called before any kind of geometric manipulation
+    This transform needs to be called before any kind of geometric manipulation.
     """
 
     def __call__(self, datapoint: Datapoint, **kwargs):
@@ -102,18 +102,43 @@ class DecodeRle:
             imgId2size[imgId] = (img_h, img_w)
 
             for obj in img.objects:
-                if obj.segment is not None and not isinstance(
-                    obj.segment, torch.Tensor
-                ):
-                    if mask_utils.area(obj.segment) == 0:
-                        print("Warning, empty mask found, approximating from box")
-                        obj.segment = torch.zeros(img_h, img_w, dtype=torch.uint8)
-                        x1, y1, x2, y2 = obj.bbox.int().tolist()
-                        obj.segment[y1 : max(y2, y1 + 1), x1 : max(x1 + 1, x2)] = 1
-                    else:
-                        obj.segment = mask_utils.decode(obj.segment)
-                        # segment is uint8 and remains uint8 throughout the transforms
-                        obj.segment = torch.tensor(obj.segment).to(torch.uint8)
+                if obj.segment is not None and not isinstance(obj.segment, torch.Tensor):
+                    # Handle multiple input formats:
+                    # - COCO RLE dict (compressed or uncompressed)
+                    # - COCO polygons list (each polygon is [x0,y0,...])
+                    # - numpy uint8 array
+                    seg = obj.segment
+                    decoded_np = None
+
+                    try:
+                        if isinstance(seg, dict):
+                            # RLE dict
+                            if mask_utils.area(seg) == 0:
+                                print("Warning, empty mask found, approximating from box")
+                                decoded_np = np.zeros((img_h, img_w), dtype=np.uint8)
+                                x1, y1, x2, y2 = obj.bbox.int().tolist()
+                                decoded_np[y1 : max(y2, y1 + 1), x1 : max(x2, x1 + 1)] = 1
+                            else:
+                                decoded_np = mask_utils.decode(seg)
+                                if decoded_np.ndim == 3:
+                                    decoded_np = decoded_np[:, :, 0]
+                        elif isinstance(seg, list):
+                            # Polygons list -> RLE -> decode
+                            rles = mask_utils.frPyObjects(seg, img_h, img_w)
+                            rle = mask_utils.merge(rles)
+                            decoded_np = mask_utils.decode(rle)
+                        elif isinstance(seg, np.ndarray):
+                            # Already a binary mask
+                            decoded_np = (seg > 0).astype(np.uint8)
+                        else:
+                            raise RuntimeError(f"Unsupported segment type: {type(seg)}")
+                    except Exception as e:
+                        # Fallback to an empty mask if decoding fails
+                        print(f"Warning, failed to decode segment ({type(seg)}): {e}")
+                        decoded_np = np.zeros((img_h, img_w), dtype=np.uint8)
+
+                    # Convert to torch uint8
+                    obj.segment = torch.as_tensor(decoded_np, dtype=torch.uint8)
 
                     if list(obj.segment.shape) != [img_h, img_w]:
                         # Should not happen often, but adding for security
@@ -132,14 +157,31 @@ class DecodeRle:
 
         warning_shown = False
         for query in datapoint.find_queries:
-            if query.semantic_target is not None and not isinstance(
-                query.semantic_target, torch.Tensor
-            ):
-                query.semantic_target = mask_utils.decode(query.semantic_target)
-                # segment is uint8 and remains uint8 throughout the transforms
-                query.semantic_target = torch.tensor(query.semantic_target).to(
-                    torch.uint8
-                )
+            if query.semantic_target is not None and not isinstance(query.semantic_target, torch.Tensor):
+                seg = query.semantic_target
+                decoded_np = None
+                h, w = imgId2size[query.image_id]
+
+                try:
+                    if isinstance(seg, dict):
+                        decoded_np = mask_utils.decode(seg)
+                        if decoded_np.ndim == 3:
+                            decoded_np = decoded_np[:, :, 0]
+                    elif isinstance(seg, list):
+                        # Polygons list -> RLE -> decode
+                        rles = mask_utils.frPyObjects(seg, h, w)
+                        rle = mask_utils.merge(rles)
+                        decoded_np = mask_utils.decode(rle)
+                    elif isinstance(seg, np.ndarray):
+                        decoded_np = (seg > 0).astype(np.uint8)
+                    else:
+                        raise RuntimeError(f"Unsupported semantic_target type: {type(seg)}")
+                except Exception as e:
+                    print(f"Warning, failed to decode semantic_target ({type(seg)}): {e}")
+                    decoded_np = np.zeros((h, w), dtype=np.uint8)
+
+                query.semantic_target = torch.as_tensor(decoded_np).to(torch.uint8)
+
                 if tuple(query.semantic_target.shape) != imgId2size[query.image_id]:
                     if not warning_shown:
                         print(
